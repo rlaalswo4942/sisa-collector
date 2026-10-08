@@ -1,0 +1,56 @@
+name: collect news
+
+on:
+  # Primary trigger: the backend Worker's cron dispatches this every hour at
+  # :40 (GitHub's own schedule runs only a few times a day in practice).
+  workflow_dispatch:
+  # Safety net in case the Worker's dispatch token expires.
+  schedule:
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    env:
+      API_BASE_URL: ${{ secrets.API_BASE_URL }}
+      API_KEY: ${{ secrets.API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: fetch RSS and filter to unseen items
+        id: rss
+        run: python fetch_rss.py
+
+      # Everything below is skipped when there's nothing new — most of a run's
+      # billed time is the browser install + per-article work.
+      - uses: actions/setup-node@v4
+        if: steps.rss.outputs.new != '0'
+        with:
+          node-version: "20"
+
+      - name: install playwright
+        if: steps.rss.outputs.new != '0'
+        run: |
+          npm init -y > /dev/null
+          npm install playwright > /dev/null 2>&1
+          npx playwright install --with-deps chromium > /dev/null 2>&1
+
+      - name: resolve real article URLs
+        if: steps.rss.outputs.new != '0'
+        run: node resolve_urls.js
+
+      - name: summarize with Gemini
+        if: steps.rss.outputs.new != '0'
+        run: python summarize.py
+
+      - name: ingest into backend
+        if: steps.rss.outputs.new != '0'
+        run: python ingest.py
